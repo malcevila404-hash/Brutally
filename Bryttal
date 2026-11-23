@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gore Sandbox WebXR</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        #enter-vr-btn {
+            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+            padding: 15px 30px; font-size: 18px; background: #ff0000; color: white;
+            border: none; border-radius: 5px; cursor: pointer; z-index: 100;
+            font-weight: bold; display: none;
+        }
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: white; font-family: sans-serif; font-size: 24px; z-index: 100;
+        }
+    </style>
+    <!-- Подключаем Three.js и WebXR -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="loading">Загрузка движка...</div>
+    <button id="enter-vr-btn">ВОЙТИ В VR</button>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+        import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        // 1. Инициализация сцены, камеры и рендера
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // Небо как на скрине
+        scene.fog = new THREE.Fog(0x87CEEB, 10, 50);
+
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 1.6, 3);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.xr.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // Свет
+        const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
+        light.position.set(0, 20, 0);
+        scene.add(light);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+        dirLight.position.set(5, 10, 5);
+        scene.add(dirLight);
+
+        // Земля (как на скрине)
+        const groundGeo = new THREE.PlaneGeometry(100, 100);
+        const groundMat = new THREE.MeshStandardMaterial({ color: 0x55aa55 }); // Зеленая трава
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        scene.add(ground);
+
+        // 2. NPC (Манекен как на скрине)
+        let npcHead;
+        function createNPC() {
+            const npcGroup = new THREE.Group();
+            
+            // Торс
+            const torso = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.8, 0.3), new THREE.MeshStandardMaterial({ color: 0x888888 }));
+            torso.position.y = 1.0;
+            npcGroup.add(torso);
+
+            // Голова (отдельный меш для отрыва)
+            npcHead = new THREE.Mesh(new THREE.SphereGeometry(0.15, 16, 16), new THREE.MeshStandardMaterial({ color: 0xaaaaaa }));
+            npcHead.position.y = 1.55;
+            npcGroup.add(npcHead);
+
+            // Ноги
+            const legs = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.6, 0.3), new THREE.MeshStandardMaterial({ color: 0x444444 }));
+            legs.position.y = 0.3;
+            npcGroup.add(legs);
+
+            npcGroup.position.set(0, 0, -2); // Ставим перед игроком
+            scene.add(npcGroup);
+        }
+        createNPC();
+
+        // 3. Контроллеры (Руки)
+        const controllerModelFactory = new XRControllerModelFactory();
+        let leftController = null;
+        let rightController = null;
+
+        function setupControllers() {
+            // ЛЕВАЯ РУКА (Меню)
+            leftController = renderer.xr.getController(0);
+            leftController.addEventListener('connected', (event) => {
+                leftController.userData.inputSource = event.data;
+            });
+            scene.add(leftController);
+
+            const gripLeft = renderer.xr.getControllerGrip(0);
+            gripLeft.add(controllerModelFactory.createControllerModel(gripLeft));
+            
+            // Привязываем меню к левой руке
+            const leftMenu = createMenu();
+            gripLeft.add(leftMenu);
+            scene.add(gripLeft);
+
+            // ПРАВАЯ РУКА (Автомат)
+            rightController = renderer.xr.getController(1);
+            rightController.addEventListener('connected', (event) => {
+                rightController.userData.inputSource = event.data;
+            });
+            scene.add(rightController);
+
+            const gripRight = renderer.xr.getControllerGrip(1);
+            gripRight.add(controllerModelFactory.createControllerModel(gripRight));
+            scene.add(gripRight);
+
+            // Добавляем автомат к правой руке
+            const gun = createGun();
+            rightController.add(gun);
+
+            // Стрельба (Squeeze/Trigger)
+            rightController.addEventListener('selectstart', onShoot);
+        }
+        setupControllers();
+
+        // 4. Меню на левой руке
+        function createMenu() {
+            const menuGroup = new THREE.Group();
+            menuGroup.visible = false; // Скрыто по умолчанию
+            menuGroup.position.set(0, 0.05, -0.1); // Над ладонью
+            menuGroup.rotation.x = -Math.PI / 2; // Смотрит вверх
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            
+            // Фон меню
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(0, 0, 256, 512);
+            
+            // Текст пунктов
+            ctx.fillStyle = 'white';
+            ctx.font = 'bold 30px Arial';
+            ctx.fillText('1. ЗВУК', 20, 100);
+            ctx.fillText('2. СЕТЬ', 20, 200);
+            ctx.fillText('3. ПРОДОЛЖИТЬ', 20, 300);
+            ctx.fillText('4. КАРТА', 20, 400);
+
+            const texture = new THREE.CanvasTexture(canvas);
+            const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true });
+            const plane = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 0.3), material);
+            menuGroup.add(plane);
+
+            return menuGroup;
+        }
+
+        // 5. Создание автомата
+        function createGun() {
+            const gunGroup = new THREE.Group();
+            const body = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.3), new THREE.MeshStandardMaterial({ color: 0x222222 }));
+            body.position.set(0, 0, -0.1);
+            gunGroup.add(body);
+            return gunGroup;
+        }
+
+        // 6. Механика выстрела и отрыва головы (Gore)
+        function onShoot() {
+            // Raycaster пускает луч из правой руки
+            const raycaster = new THREE.Raycaster();
+            const tempMatrix = new THREE.Matrix4();
+            tempMatrix.identity().extractRotation(rightController.matrixWorld);
+            raycaster.ray.origin.setFromMatrixPosition(rightController.matrixWorld);
+            raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+
+            // Проверяем попадание в голову
+            if (npcHead) {
+                const intersects = raycaster.intersectObject(npcHead);
+                if (intersects.length > 0 && intersects[0].distance < 10) {
+                    // Отрываем голову (Gore эффект)
+                    npcHead.position.y -= 0.5; // Падает вниз (можно заменить на физику Ragdoll)
+                    npcHead.position.z += 0.2;
+                    
+                    // Спавн крови (частицы)
+                    spawnBlood(intersects[0].point);
+                }
+            }
+        }
+
+        // 7. Кровь (Простые частицы)
+        function spawnBlood(position) {
+            const particleCount = 30;
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(particleCount * 3);
+            const velocities = [];
+
+            for (let i = 0; i < particleCount; i++) {
+                positions[i * 3] = position.x;
+                positions[i * 3 + 1] = position.y;
+                positions[i * 3 + 2] = position.z;
+                velocities.push(new THREE.Vector3(
+                    (Math.random() - 0.5) * 0.2,
+                    Math.random() * 0.2,
+                    (Math.random() - 0.5) * 0.2
+                ));
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            const material = new THREE.PointsMaterial({ color: 0xff0000, size: 0.03 });
+            const particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+
+            // Анимация частиц (упрощенно)
+            let life = 0;
+            function animateBlood() {
+                if (life > 100) {
+                    scene.remove(particles);
+                    return;
+                }
+                const posAttr = geometry.attributes.position;
+                for (let i = 0; i < particleCount; i++) {
+                    posAttr.array[i * 3] += velocities[i].x;
+                    posAttr.array[i * 3 + 1] += velocities[i].y;
+                    posAttr.array[i * 3 + 2] += velocities[i].z;
+                    velocities[i].y -= 0.01; // Гравитация
+                }
+                posAttr.needsUpdate = true;
+                life++;
+                requestAnimationFrame(animateBlood);
+            }
+            animateBlood();
+        }
+
+        // 8. Отслеживание кнопки B и Menu
+        function setupInputListeners() {
+            // Проверяем состояние кнопок в каждом кадре
+            setInterval(() => {
+                if (leftController && leftController.userData.inputSource) {
+                    const gamepad = leftController.userData.inputSource.gamepad;
+                    if (gamepad) {
+                        // Кнопка B обычно это index 1 или 3 (зависит от контроллера)
+                        // Кнопка Menu обычно index 3
+                        const btnB = gamepad.buttons[1];
+                        const btnMenu = gamepad.buttons[3];
+
+                        if ((btnB && btnB.pressed) || (btnMenu && btnMenu.pressed)) {
+                            // Открываем/закрываем меню
+                            const menu = leftController.parent.children.find(c => c.type === 'Group' && c.children[0]?.geometry?.type === 'PlaneGeometry');
+                            if (menu) menu.visible = !menu.visible;
+                        }
+                    }
+                }
+            }, 100);
+        }
+        setupInputListeners();
+
+        // 9. Запуск VR и рендер
+        const vrButton = document.getElementById('enter-vr-btn');
+        if ('xr' in navigator) {
+            navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+                if (supported) {
+                    document.getElementById('loading').style.display = 'none';
+                    vrButton.style.display = 'block';
+                    vrButton.addEventListener('click', () => {
+                        navigator.xr.requestSession('immersive-vr', {
+                            optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+                        }).then((session) => {
+                            renderer.xr.setSession(session);
+                        });
+                    });
+                }
+            });
+        }
+
+        // Анимационный цикл
+        renderer.setAnimationLoop(() => {
+            renderer.render(scene, camera);
+        });
+
+        // Обработка ресайза (для ПК)
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
